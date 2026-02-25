@@ -1,0 +1,28 @@
+[project]
+name = "ai-report-system"
+version = "1.0.0"
+description = "基于 FastAPI + LangGraph 的多 Agent 协同报告生成系统"
+requires-python = ">=3.14"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "langchain>=0.3.7",
+    "langchain-core>=0.3.15",
+    "langchain-openai>=0.2.9",
+    "langgraph>=0.2.45",
+    "python-docx>=1.1.2",
+    "pydantic>=2.10.0",
+    "pydantic-settings>=2.6.0",
+    "sqlalchemy>=2.0.36",
+    "pymysql>=1.1.1",
+    "httpx>=0.28.0",
+    "python-multipart>=0.0.12",
+    "openai>=2.23.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["agents", "tools", "graph", "models"]
