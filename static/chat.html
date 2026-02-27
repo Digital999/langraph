@@ -280,7 +280,7 @@
             const typingDiv = addTypingIndicator();
             
             try {
-                const response = await fetch('http://localhost:8000/api/chat-stream', {
+                const response = await fetch('http://192.168.68.9:8001/api/chat-stream', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
@@ -339,7 +339,7 @@
                                 } else if (data.type === 'end') {
                                     if (reportUrl) {
                                         assistantContent.innerHTML = fullContent + 
-                                            `<br><br><a href="http://localhost:8000${reportUrl}" class="report-link" download>📄 下载报告</a>`;
+                                            `<br><br><a href="http://192.168.68.9:8001${reportUrl}" class="report-link" download>📄 下载报告</a>`;
                                     }
                                     
                                     // 在控制台显示性能统计（可选）

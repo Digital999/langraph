@@ -294,7 +294,7 @@ async def chat_stream(request: UserRequest):
                         return
                     else:
                         # 用户输入不明确，继续询问
-                        yield f"data: {json.dumps({'type': 'content', 'content': '请明确回复"是"或"不需要"。'}, ensure_ascii=False)}\n\n"
+                        yield f"data: {json.dumps({'type': 'content', 'content': '请明确回复"是"或"不需要"确认是否需要生成报告。'}, ensure_ascii=False)}\n\n"
                         total_elapsed = (asyncio.get_event_loop().time() - total_start_time) * 1000
                         yield f"data: {json.dumps({'type': 'end', 'status': 'complete', 'performance': {'total_ms': total_elapsed}}, ensure_ascii=False)}\n\n"
                         return
@@ -460,7 +460,7 @@ async def chat_stream(request: UserRequest):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8001)
 
 
 
