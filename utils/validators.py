@@ -1,4 +1,5 @@
 """输入验证工具"""
+import html
 import re
 from typing import Tuple
 
@@ -51,7 +52,7 @@ def validate_id_card(id_card: str) -> Tuple[bool, str]:
 
 def sanitize_input(text: str, max_length: int = 1000) -> str:
     """
-    清理用户输入
+    清理用户输入,防止注入攻击
     
     Args:
         text: 输入文本
@@ -65,6 +66,12 @@ def sanitize_input(text: str, max_length: int = 1000) -> str:
     
     # 移除首尾空白
     text = text.strip()
+    
+    # HTML转义
+    text = html.escape(text)
+    
+    # 移除控制字符
+    text = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', text)
     
     # 限制长度
     if len(text) > max_length:

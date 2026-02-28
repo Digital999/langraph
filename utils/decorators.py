@@ -2,7 +2,8 @@
 import time
 import traceback
 from functools import wraps
-from typing import Callable, Any
+from typing import Any, Callable, Dict, List
+
 from utils.logger import logger
 
 
@@ -39,7 +40,7 @@ def handle_agent_error(error_message: str = "处理失败"):
 class PerformanceTimer:
     """性能计时器上下文管理器"""
     
-    def __init__(self, name: str, metrics_dict: dict = None):
+    def __init__(self, name: str, metrics_dict: Dict[str, float] | None = None):
         """
         初始化计时器
         
@@ -49,8 +50,8 @@ class PerformanceTimer:
         """
         self.name = name
         self.metrics_dict = metrics_dict
-        self.start_time = None
-        self.elapsed_ms = 0
+        self.start_time: float = 0.0
+        self.elapsed_ms: float = 0.0
     
     def __enter__(self):
         self.start_time = time.time()
@@ -66,7 +67,12 @@ class PerformanceTimer:
         return False  # 不抑制异常
 
 
-def update_conversation_history(history: list, user_input: str, assistant_response: str = "", max_turns: int = 10) -> list:
+def update_conversation_history(
+    history: List[str],
+    user_input: str,
+    assistant_response: str = "",
+    max_turns: int = 10
+) -> List[str]:
     """
     更新对话历史
     
@@ -91,7 +97,7 @@ def update_conversation_history(history: list, user_input: str, assistant_respon
     return history
 
 
-def build_history_string(history: list, max_turns: int = 3) -> str:
+def build_history_string(history: List[str], max_turns: int = 3) -> str:
     """
     构建对话历史字符串
     

@@ -1,13 +1,24 @@
 """结果格式化 Agent - 将查询结果格式化为用户友好的文本"""
+import traceback
+from typing import Any, Dict, List
+
+from langgraph.config import get_stream_writer
 from models.schemas import AgentState
-from utils.logger import logger
 from utils.constants import MEAL_STATUS_MAP
 from utils.decorators import PerformanceTimer
-import traceback
+from utils.logger import logger
 
-def format_query_results(query_results: dict) -> str:
-    """将查询结果格式化为用户友好的文本"""
-    lines = []
+def format_query_results(query_results: Dict[str, Any]) -> str:
+    """
+    将查询结果格式化为用户友好的文本
+    
+    Args:
+        query_results: 查询结果字典
+        
+    Returns:
+        格式化后的文本
+    """
+    lines: List[str] = []
     lines.append("查询结果：")
     lines.append("")
     
@@ -89,10 +100,18 @@ def process_format_result(state: AgentState) -> AgentState:
     logger.separator()
     logger.info("开始格式化查询结果")
     
+    # 获取流式写入器
+    try:
+        writer = get_stream_writer()
+    except Exception:
+        writer = None
+    
     if not state.get("query_results"):
         logger.error("缺少查询结果")
         state["error"] = "缺少查询结果"
         state["next_step"] = "end"
+        if writer:
+            writer({"type": "error", "content": "缺少查询结果"})
         return state
     
     try:
@@ -108,6 +127,8 @@ def process_format_result(state: AgentState) -> AgentState:
             logger.error(f"查询结果类型错误: {type(query_results)}")
             state["error"] = "查询结果格式错误"
             state["next_step"] = "end"
+            if writer:
+                writer({"type": "error", "content": "查询结果格式错误"})
             return state
         
         # 使用性能计时器
@@ -116,9 +137,18 @@ def process_format_result(state: AgentState) -> AgentState:
             formatted_result = format_query_results(query_results)
             logger.debug(f"格式化结果:\n{formatted_result}")
             
+            # 推送格式化后的结果到前端（保留换行符）
+            if writer:
+                # 方案1：直接发送完整结果，前端需要处理\n
+                writer({"type": "result", "content": formatted_result})
+            
             # 添加询问是否生成报告
-            formatted_result += "\n" + "="*50 + "\n"
-            formatted_result += '是否需要生成详细报告？（回复"是"、"需要"、"生成报告"等即可生成Word报告）'
+            report_prompt = "\n" + "="*50 + "\n" + '是否需要生成详细报告？（回复"是"、"需要"、"生成报告"等即可生成Word报告）'
+            formatted_result += report_prompt
+            
+            # 推送报告询问
+            if writer:
+                writer({"type": "message", "content": report_prompt})
             
             state["error"] = formatted_result  # 使用 error 字段返回结果
             state["waiting_for_report_confirmation"] = True
@@ -131,4 +161,6 @@ def process_format_result(state: AgentState) -> AgentState:
         logger.error(f"格式化失败: {traceback.format_exc()}")
         state["error"] = "结果格式化失败"
         state["next_step"] = "end"
+        if writer:
+            writer({"type": "error", "content": "结果格式化失败"})
         return state

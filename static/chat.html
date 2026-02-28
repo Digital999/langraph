@@ -108,6 +108,10 @@
             box-shadow: 0 2px 5px rgba(0,0,0,0.1);
         }
         
+        .message.assistant .message-content.preserve-whitespace {
+            white-space: pre-wrap; /* 保留换行符和空格 */
+        }
+        
         .report-link {
             display: inline-block;
             margin-top: 10px;
@@ -253,6 +257,10 @@
             
             const contentDiv = document.createElement('div');
             contentDiv.className = 'message-content';
+            // 为助手消息添加 preserve-whitespace 类，以保留换行符
+            if (!isUser) {
+                contentDiv.classList.add('preserve-whitespace');
+            }
             contentDiv.innerHTML = content;
             
             messageDiv.appendChild(contentDiv);
@@ -327,21 +335,20 @@
                                     fullContent += data.content;
                                     assistantContent.textContent = fullContent;
                                     chatArea.scrollTop = chatArea.scrollHeight;
+                                } else if (data.type === 'report') {
+                                    // 报告生成完成，只添加下载按钮
+                                    reportUrl = data.url;
+                                    assistantContent.innerHTML = fullContent + 
+                                        `<br><br><a href="http://192.168.68.9:8001${reportUrl}" class="report-link" download>📄 下载报告</a>`;
+                                    chatArea.scrollTop = chatArea.scrollHeight;
                                 } else if (data.type === 'progress') {
                                     fullContent += data.message;
                                     assistantContent.textContent = fullContent;
                                     chatArea.scrollTop = chatArea.scrollHeight;
-                                } else if (data.type === 'report') {
-                                    reportUrl = data.url;
                                 } else if (data.type === 'performance') {
                                     performanceMetrics = data.metrics;
                                     console.log('性能统计:', performanceMetrics);
                                 } else if (data.type === 'end') {
-                                    if (reportUrl) {
-                                        assistantContent.innerHTML = fullContent + 
-                                            `<br><br><a href="http://192.168.68.9:8001${reportUrl}" class="report-link" download>📄 下载报告</a>`;
-                                    }
-                                    
                                     // 在控制台显示性能统计（可选）
                                     if (performanceMetrics) {
                                         console.log('📊 性能统计详情:');

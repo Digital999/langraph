@@ -1,22 +1,18 @@
 """FastAPI 主应用入口"""
+import asyncio
 import os
 import traceback
-import json
-import asyncio
 from typing import AsyncGenerator
+
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from models.schemas import UserRequest, AgentResponse, AgentState
+
 from graph import app as workflow_app
+from models.schemas import AgentResponse, AgentState, UserRequest
+from utils.constants import QUICK_RESPONSES
 from utils.logger import logger
-from utils.constants import (
-    QUICK_RESPONSES, CONFIRM_KEYWORDS, REJECT_KEYWORDS,
-    STREAM_CHUNK_SIZE, STREAM_DELAY, QUEUE_CHECK_INTERVAL,
-    MAX_CONVERSATION_TURNS
-)
-from utils.decorators import update_conversation_history
 from utils.validators import sanitize_input
 
 app = FastAPI(
@@ -175,27 +171,26 @@ async def health_check():
 @app.post("/api/chat-stream")
 async def chat_stream(request: UserRequest):
     """
-    真正的流式对话接口 - 实时输出 LLM 响应，支持会话状态
+    流式对话接口 - 使用LangGraph原生流式支持
     
     Args:
-        request: 用户请求，包含用户输入和会话ID
+        request: 用户请求,包含用户输入和会话ID
         
     Returns:
         StreamingResponse: Server-Sent Events (SSE) 流式响应
     """
-    from agents.intent_agent_stream import process_intent_stream
     import uuid
+    import json
     
-    # 生成或使用会话ID（作为 thread_id）
+    # 生成或使用会话ID
     thread_id = request.session_id or str(uuid.uuid4())
-    
-    logger.info(f"会话ID (thread_id): {thread_id}")
+    logger.info(f"会话ID: {thread_id}")
     
     async def generate_stream() -> AsyncGenerator[str, None]:
         """生成流式响应"""
         logger.separator("=")
         
-        # 清理用户输入
+        # 清理并验证用户输入
         user_input = sanitize_input(request.user_input)
         if not user_input:
             yield f"data: {json.dumps({'type': 'content', 'content': '请输入有效的查询内容'}, ensure_ascii=False)}\n\n"
@@ -203,248 +198,83 @@ async def chat_stream(request: UserRequest):
             return
         
         logger.info(f"收到流式请求 [会话:{thread_id}]: {user_input}")
-        
-        total_start_time = asyncio.get_event_loop().time()
+        start_time = asyncio.get_event_loop().time()
         
         try:
-            # 立即发送开始事件
+            # 发送开始事件
             yield f"data: {json.dumps({'type': 'start', 'session_id': thread_id}, ensure_ascii=False)}\n\n"
             
-            # 检查是否是常见问候（快速响应）
+            # 检查是否是快速响应(缓存的问候语)
             user_input_lower = user_input.strip().lower()
             if user_input_lower in QUICK_RESPONSES:
                 logger.info(f"✓ 使用缓存响应: {user_input_lower}")
                 response_text = QUICK_RESPONSES[user_input_lower]
-                # 模拟流式输出
-                for i in range(0, len(response_text), STREAM_CHUNK_SIZE):
-                    chunk = response_text[i:i+STREAM_CHUNK_SIZE]
+                for i in range(0, len(response_text), 5):
+                    chunk = response_text[i:i+5]
                     yield f"data: {json.dumps({'type': 'content', 'content': chunk}, ensure_ascii=False)}\n\n"
-                    await asyncio.sleep(STREAM_DELAY)
+                    await asyncio.sleep(0.01)
                 
-                total_elapsed = (asyncio.get_event_loop().time() - total_start_time) * 1000
-                yield f"data: {json.dumps({'type': 'end', 'status': 'complete', 'performance': {'total_ms': total_elapsed}}, ensure_ascii=False)}\n\n"
-                logger.info(f"✓ 缓存响应完成，总耗时: {total_elapsed:.0f}ms")
+                elapsed = (asyncio.get_event_loop().time() - start_time) * 1000
+                yield f"data: {json.dumps({'type': 'end', 'status': 'complete', 'performance': {'total_ms': elapsed}}, ensure_ascii=False)}\n\n"
+                logger.info(f"✓ 缓存响应完成,耗时: {elapsed:.0f}ms")
                 return
             
-            # 创建 LangGraph 配置
+            # 配置workflow
             config = {"configurable": {"thread_id": thread_id}}
-            
-            # 创建初始输入
             initial_input = {"user_input": user_input}
             
-            # 获取事件循环
-            loop = asyncio.get_event_loop()
+            # 配置workflow
+            config = {"configurable": {"thread_id": thread_id}}
+            initial_input = {"user_input": user_input}
             
-            # 检查是否在等待报告确认
-            # 先获取当前会话状态
-            try:
-                current_state = workflow_app.get_state(config)
-                if current_state and current_state.values.get("waiting_for_report_confirmation"):
-                    logger.info("检测到报告确认请求")
-                    # 用户正在回复是否生成报告
-                    user_input_lower = user_input.lower()
+            # 使用LangGraph的astream方法，只监听custom事件
+            # custom: 接收来自get_stream_writer()的自定义事件（格式化后的消息）
+            async for event in workflow_app.astream(
+                initial_input,
+                config=config,
+                stream_mode="custom"  # 只监听自定义事件
+            ):
+                # 单一stream_mode时，event直接是数据字典
+                if isinstance(event, dict):
+                    chunk_type = event.get("type", "content")
                     
-                    # 检查是否确认生成报告
-                    is_confirm = any(keyword in user_input_lower for keyword in CONFIRM_KEYWORDS)
-                    is_reject = any(keyword in user_input_lower for keyword in REJECT_KEYWORDS)
+                    if chunk_type == "message":
+                        # 完整消息（如：询问手机号）
+                        yield f"data: {json.dumps({'type': 'content', 'content': event.get('content', '')}, ensure_ascii=False)}\n\n"
                     
-                    logger.debug(f"用户输入: {user_input_lower}, 确认={is_confirm}, 拒绝={is_reject}")
+                    elif chunk_type == "result":
+                        # 查询结果
+                        yield f"data: {json.dumps({'type': 'content', 'content': event.get('content', '')}, ensure_ascii=False)}\n\n"
                     
-                    if is_reject:
-                        # 用户拒绝生成报告，清除等待标志
-                        yield f"data: {json.dumps({'type': 'content', 'content': '好的，如果以后需要生成报告，请告诉我。'}, ensure_ascii=False)}\n\n"
-                        
-                        # 更新状态，清除 waiting_for_report_confirmation 标志
-                        await loop.run_in_executor(
-                            None,
-                            lambda: workflow_app.update_state(
-                                config,
-                                {"waiting_for_report_confirmation": False}
-                            )
-                        )
-                        
-                        total_elapsed = (asyncio.get_event_loop().time() - total_start_time) * 1000
-                        yield f"data: {json.dumps({'type': 'end', 'status': 'complete', 'performance': {'total_ms': total_elapsed}}, ensure_ascii=False)}\n\n"
-                        logger.info(f"✓ 用户拒绝生成报告，总耗时: {total_elapsed:.0f}ms")
-                        return
-                    elif is_confirm:
-                        # 用户确认生成报告
-                        yield f"data: {json.dumps({'type': 'content', 'content': '正在生成报告...'}, ensure_ascii=False)}\n\n"
-                        
-                        # 调用工作流生成报告
-                        final_result = await loop.run_in_executor(
-                            None, 
-                            lambda: workflow_app.invoke(initial_input, config)
-                        )
-                        
-                        # 检查报告是否生成成功
-                        if final_result.get("report_path"):
-                            filename = os.path.basename(final_result["report_path"])
-                            report_url = f"/api/download/{filename}"
-                            success_msg = f"\n\n✓ 报告生成成功！\n\n下载链接：{report_url}"
-                            yield f"data: {json.dumps({'type': 'content', 'content': success_msg}, ensure_ascii=False)}\n\n"
-                            yield f"data: {json.dumps({'type': 'report', 'filename': filename, 'url': report_url}, ensure_ascii=False)}\n\n"
-                        else:
-                            error_msg = final_result.get("error", "报告生成失败")
-                            yield f"data: {json.dumps({'type': 'content', 'content': f'\n\n{error_msg}'}, ensure_ascii=False)}\n\n"
-                        
-                        total_elapsed = (asyncio.get_event_loop().time() - total_start_time) * 1000
-                        yield f"data: {json.dumps({'type': 'end', 'status': 'complete', 'performance': {'total_ms': total_elapsed}}, ensure_ascii=False)}\n\n"
-                        logger.info(f"✓ 报告生成完成，总耗时: {total_elapsed:.0f}ms")
-                        return
+                    elif chunk_type == "intent_complete":
+                        # 意图理解完成，开始查询
+                        yield f"data: {json.dumps({'type': 'content', 'content': '正在查询数据...'}, ensure_ascii=False)}\n\n"
+                    
+                    elif chunk_type == "status":
+                        # 状态消息
+                        yield f"data: {json.dumps({'type': 'status', 'message': event.get('message', '')}, ensure_ascii=False)}\n\n"
+                    
+                    elif chunk_type == "error":
+                        # 错误消息
+                        yield f"data: {json.dumps({'type': 'error', 'content': event.get('content', '')}, ensure_ascii=False)}\n\n"
+                    
+                    elif chunk_type == "report":
+                        # 报告生成完成，推送报告信息（保持原始事件结构）
+                        yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+                    
                     else:
-                        # 用户输入不明确，继续询问
-                        yield f"data: {json.dumps({'type': 'content', 'content': '请明确回复"是"或"不需要"确认是否需要生成报告。'}, ensure_ascii=False)}\n\n"
-                        total_elapsed = (asyncio.get_event_loop().time() - total_start_time) * 1000
-                        yield f"data: {json.dumps({'type': 'end', 'status': 'complete', 'performance': {'total_ms': total_elapsed}}, ensure_ascii=False)}\n\n"
-                        return
-            except Exception as e:
-                logger.warning(f"获取会话状态失败: {e}")
+                        # 其他自定义事件
+                        yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
             
-            # 使用队列在线程间传递流式内容
-            import queue
-            content_queue = queue.Queue()
-            
-            def sync_callback(content: str):
-                content_queue.put(('content', content))
-            
-            # 获取对话历史
-            conversation_history = []
-            try:
-                current_state = workflow_app.get_state(config)
-                if current_state and current_state.values:
-                    conversation_history = current_state.values.get("conversation_history", [])
-                    logger.debug(f"加载对话历史: {len(conversation_history)} 条")
-            except Exception as e:
-                logger.warning(f"获取对话历史失败: {e}")
-            
-            # 创建临时状态用于流式输出意图理解
-            temp_state: AgentState = {
-                "user_input": user_input,
-                "is_complete": False,
-                "conversation_history": conversation_history,
-            }
-            
-            # 启动后台任务
-            future = loop.run_in_executor(
-                None, 
-                lambda: process_intent_stream(temp_state, sync_callback)
-            )
-            
-            # 实时从队列中读取并输出
-            result_state = None
-            while True:
-                try:
-                    # 非阻塞获取，快速检查
-                    msg_type, content = content_queue.get_nowait()
-                    if msg_type == 'content':
-                        yield f"data: {json.dumps({'type': 'content', 'content': content}, ensure_ascii=False)}\n\n"
-                except queue.Empty:
-                    # 队列为空，检查任务是否完成
-                    if future.done():
-                        result_state = future.result()
-                        break
-                    # 短暂等待，避免CPU空转
-                    await asyncio.sleep(QUEUE_CHECK_INTERVAL)
-            
-            # 输出队列中剩余的内容
-            while not content_queue.empty():
-                msg_type, content = content_queue.get_nowait()
-                if msg_type == 'content':
-                    yield f"data: {json.dumps({'type': 'content', 'content': content}, ensure_ascii=False)}\n\n"
-            
-            # 更新对话历史到 LangGraph 状态
-            if result_state:
-                try:
-                    # 获取当前状态
-                    current_state = workflow_app.get_state(config)
-                    if current_state:
-                        # 更新对话历史
-                        conversation_history = current_state.values.get("conversation_history", [])
-                        assistant_response = result_state.get("error", "")
-                        conversation_history = update_conversation_history(
-                            conversation_history,
-                            user_input,
-                            assistant_response,
-                            max_turns=MAX_CONVERSATION_TURNS
-                        )
-                        
-                        # 更新状态
-                        await loop.run_in_executor(
-                            None,
-                            lambda: workflow_app.update_state(
-                                config,
-                                {"conversation_history": conversation_history}
-                            )
-                        )
-                        logger.debug(f"对话历史已更新: {len(conversation_history)} 条")
-                except Exception as e:
-                    logger.warning(f"更新对话历史失败: {e}")
-            
-            # 检查是否需要继续查询
-            if result_state and result_state["is_complete"]:
-                # 需要查询数据库
-                yield f"data: {json.dumps({'type': 'content', 'content': '正在查询数据...'}, ensure_ascii=False)}\n\n"
-                
-                # 使用 LangGraph 的 invoke 方法，传入 config 实现会话管理
-                final_result = await loop.run_in_executor(
-                    None, 
-                    lambda: workflow_app.invoke(initial_input, config)
-                )
-                
-                # 计算总耗时
-                total_elapsed = (asyncio.get_event_loop().time() - total_start_time) * 1000
-                perf_data = final_result.get("performance_metrics", {})
-                perf_data["total_ms"] = total_elapsed
-                
-                # 输出性能统计
-                yield f"data: {json.dumps({'type': 'performance', 'metrics': perf_data}, ensure_ascii=False)}\n\n"
-                logger.info(f"✓ 性能统计: {json.dumps(perf_data, ensure_ascii=False)}")
-                
-                # 输出查询结果（存储在 error 字段中）
-                if final_result.get("error"):
-                    result_content = final_result.get("error", "")
-                    # 以 content 类型输出查询结果
-                    yield f"data: {json.dumps({'type': 'content', 'content': '\n\n' + result_content}, ensure_ascii=False)}\n\n"
-                    
-                    # 更新对话历史，添加查询结果
-                    try:
-                        current_state = workflow_app.get_state(config)
-                        if current_state:
-                            conversation_history = current_state.values.get("conversation_history", [])
-                            # 添加查询结果到历史（简化版本，避免过长）
-                            conversation_history = update_conversation_history(
-                                conversation_history,
-                                user_input,
-                                "查询完成",
-                                max_turns=MAX_CONVERSATION_TURNS
-                            )
-                            
-                            await loop.run_in_executor(
-                                None,
-                                lambda: workflow_app.update_state(
-                                    config,
-                                    {"conversation_history": conversation_history}
-                                )
-                            )
-                    except Exception as e:
-                        logger.warning(f"更新对话历史失败: {e}")
-                    
-                    yield f"data: {json.dumps({'type': 'end', 'status': 'complete'}, ensure_ascii=False)}\n\n"
-                else:
-                    yield f"data: {json.dumps({'type': 'content', 'content': '\\n\\n查询完成，但未返回结果。'}, ensure_ascii=False)}\n\n"
-                    yield f"data: {json.dumps({'type': 'end', 'status': 'error'}, ensure_ascii=False)}\n\n"
-            else:
-                # 对话或提示，不需要查询
-                total_elapsed = (asyncio.get_event_loop().time() - total_start_time) * 1000
-                yield f"data: {json.dumps({'type': 'performance', 'metrics': {'total_ms': total_elapsed}}, ensure_ascii=False)}\n\n"
-                yield f"data: {json.dumps({'type': 'end', 'status': 'complete'}, ensure_ascii=False)}\n\n"
-                logger.info(f"✓ 对话完成，总耗时: {total_elapsed:.0f}ms")
+            # 流式完成
+            elapsed = (asyncio.get_event_loop().time() - start_time) * 1000
+            yield f"data: {json.dumps({'type': 'end', 'status': 'complete', 'performance': {'total_ms': elapsed}}, ensure_ascii=False)}\n\n"
+            logger.info(f"✓ 对话完成,耗时: {elapsed:.0f}ms")
         
         except Exception as e:
-            error_msg = f"\\n\\n抱歉，处理请求时出错: {str(e)}"
+            error_msg = f"抱歉,处理请求时出错: {str(e)}"
             logger.error(f"流式处理错误:\n{traceback.format_exc()}")
-            yield f"data: {json.dumps({'type': 'content', 'content': error_msg}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'type': 'error', 'content': error_msg}, ensure_ascii=False)}\n\n"
             yield f"data: {json.dumps({'type': 'end', 'status': 'error'}, ensure_ascii=False)}\n\n"
     
     return StreamingResponse(
@@ -454,7 +284,7 @@ async def chat_stream(request: UserRequest):
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
-            "Transfer-Encoding": "chunked"  # 确保分块传输
+            "Transfer-Encoding": "chunked"
         }
     )
 

@@ -1,9 +1,12 @@
 """配置文件"""
 import os
+
 from pydantic_settings import BaseSettings
 
+
 class Settings(BaseSettings):
-    # OpenAI 配置
+    """应用配置"""
+    # OpenAI配置
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
     OPENAI_BASE_URL: str = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
     MODEL_NAME: str = os.getenv("MODEL_NAME", "gpt-4")
@@ -20,6 +23,9 @@ class Settings(BaseSettings):
     IDENTITY_API_KEY: str = os.getenv("IDENTITY_API_KEY", "")
     
     class Config:
+        """Pydantic配置"""
         env_file = ".env"
+        case_sensitive = True
+
 
 settings = Settings()

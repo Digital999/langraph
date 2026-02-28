@@ -1,14 +1,20 @@
 """报告生成 Agent - 生成 Word 报告"""
-from docx import Document
-from datetime import datetime
+import json
 import os
-from models.schemas import AgentState
-from langchain_openai import ChatOpenAI
-from langchain_core.prompts import ChatPromptTemplate
-from config import settings
-from utils.logger import logger
-from utils.constants import REPORT_LLM_TEMPERATURE, LLM_MAX_RETRIES, LLM_TIMEOUT
 import traceback
+from datetime import datetime
+from typing import Any, Dict, Union
+
+from docx import Document
+from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_openai import ChatOpenAI
+from langgraph.config import get_stream_writer
+
+from config import settings
+from models.schemas import AgentState
+from utils.constants import LLM_MAX_RETRIES, LLM_TIMEOUT, REPORT_LLM_TEMPERATURE
+from utils.logger import logger
 
 REPORT_SYSTEM_PROMPT = """你是一个专业的报告生成助手，负责将查询结果整理成结构化的报告内容。
 
@@ -46,13 +52,22 @@ prompt = ChatPromptTemplate.from_messages([
 
 chain = prompt | llm
 
-def generate_word_report(report_content: dict, filename: str) -> str:
-    """生成 Word 报告文件"""
+def generate_word_report(report_content: Dict[str, Any], filename: str) -> str:
+    """
+    生成Word报告文件
+    
+    Args:
+        report_content: 报告内容字典
+        filename: 文件名
+        
+    Returns:
+        文件路径
+    """
     doc = Document()
     
     # 标题
     title = doc.add_heading(report_content.get("title", "用户信息查询报告"), 0)
-    title.alignment = 1  # 居中
+    title.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
     
     # 生成时间
     doc.add_paragraph(f"生成时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -104,51 +119,64 @@ def process_report(state: AgentState) -> AgentState:
     logger.separator()
     logger.info("开始生成报告")
     
+    # 获取流式写入器
+    try:
+        writer = get_stream_writer()
+    except Exception:
+        writer = None
+    
     if not state.get("query_results"):
         logger.error("缺少查询结果")
         state["error"] = "缺少查询结果"
         state["next_step"] = "end"
+        if writer:
+            writer({"type": "error", "content": "缺少查询结果"})
         return state
     
     logger.debug(f"查询结果: {state['query_results']}")
     
     try:
+        # 推送状态：开始生成报告
+        if writer:
+            writer({"type": "content", "content": "正在生成报告..."})
+        
         # 使用 LLM 生成报告内容
         logger.debug("调用 LLM 生成报告内容...")
         start_time = datetime.now()
         
         response = chain.invoke({
-            "user_input": state["user_input"],
-            "query_results": str(state["query_results"])
+            "user_input": state.get("user_input", ""),
+            "query_results": str(state.get("query_results", {}))
         })
         
         elapsed = (datetime.now() - start_time).total_seconds() * 1000
         logger.debug(f"LLM 响应耗时: {elapsed:.0f}ms")
         
-        import json
-        # 处理响应内容，确保是字符串
-        content = response.content
+        # 处理响应内容
+        content: Union[str, list, Dict[str, Any]] = response.content
         if isinstance(content, list):
             content = content[0] if content else "{}"
-            if hasattr(content, 'text'):
-                content = content.text
         
         content_str = str(content).strip()
         logger.llm_output(content_str)
         
         # 清理 markdown 代码块标记
         if content_str.startswith("```json"):
-            content_str = content_str[7:]  # 移除 ```json
+            content_str = content_str[7:]
         elif content_str.startswith("```"):
-            content_str = content_str[3:]  # 移除 ```
+            content_str = content_str[3:]
         
         if content_str.endswith("```"):
-            content_str = content_str[:-3]  # 移除结尾的 ```
+            content_str = content_str[:-3]
         
         content_str = content_str.strip()
         
         report_content = json.loads(content_str)
         logger.debug(f"报告结构: {list(report_content.keys())}")
+        
+        # 推送状态：正在生成Word文件
+        if writer:
+            writer({"type": "status", "message": "正在生成Word文件..."})
         
         # 生成 Word 文件
         filename = f"report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.docx"
@@ -159,10 +187,20 @@ def process_report(state: AgentState) -> AgentState:
         state["report_path"] = filepath
         state["next_step"] = "end"
         logger.info(f"✓ 报告生成成功: {filepath}")
+        
+        # 推送成功消息和下载链接
+        if writer:
+            # 先推送成功消息（作为普通内容）
+            writer({"type": "message", "content": "\n✓ 报告生成成功！"})
+            # 再推送报告URL（前端会渲染为下载按钮）
+            report_url = f"/api/download/{filename}"
+            writer({"type": "report", "filename": filename, "url": report_url})
     
     except Exception as e:
         logger.error(f"报告生成失败:\n{traceback.format_exc()}")
         state["error"] = f"报告生成失败: {str(e)}"
         state["next_step"] = "end"
+        if writer:
+            writer({"type": "error", "content": state["error"]})
     
     return state

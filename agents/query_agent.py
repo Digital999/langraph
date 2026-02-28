@@ -1,14 +1,19 @@
 """查库 Agent - 使用 MCP 工具通过大模型自主决策查询数据"""
-from langchain_openai import ChatOpenAI
+import json
+import traceback
+from typing import Any, Dict
+
 from langchain_core.messages import HumanMessage, SystemMessage
-from langgraph.prebuilt import create_react_agent
+from langchain_openai import ChatOpenAI
+from langchain.agents import create_agent
+from langgraph.config import get_stream_writer
+
 from config import settings
 from models.schemas import AgentState
 from tools import ALL_TOOLS
-from utils.logger import logger
-from utils.constants import LLM_TEMPERATURE, LLM_MAX_RETRIES, LLM_TIMEOUT
+from utils.constants import LLM_MAX_RETRIES, LLM_TEMPERATURE, LLM_TIMEOUT
 from utils.decorators import PerformanceTimer
-import traceback
+from utils.logger import logger
 
 QUERY_SYSTEM_PROMPT = """你是一个专业的数据查询助手，负责根据用户需求调用相应的数据库查询工具。
 
@@ -58,12 +63,19 @@ llm = ChatOpenAI(
 )
 
 # 创建 ReAct Agent
-query_agent = create_react_agent(llm, ALL_TOOLS)
+query_agent = create_agent(llm, ALL_TOOLS)
 
 def process_query(state: AgentState) -> AgentState:
     """执行数据库查询 - 通过大模型自主选择工具"""
     logger.separator()
     logger.info("开始数据查询")
+    
+    # 获取流式写入器（如果在流式上下文中）
+    try:
+        writer = get_stream_writer()
+        writer({"type": "status", "message": "正在查询数据..."})
+    except Exception:
+        writer = None
     
     # 初始化性能指标
     if "performance_metrics" not in state:
@@ -134,56 +146,63 @@ def process_query(state: AgentState) -> AgentState:
                 result = query_agent.invoke({"messages": messages})
             
             # 提取工具调用结果和性能数据
-            tool_results = {}
+            tool_results: Dict[str, Any] = {}
             has_error = False
             
             if "messages" in result:
                 logger.debug(f"收到 {len(result['messages'])} 条消息")
                 for msg in result["messages"]:
-                    # 只处理工具消息（ToolMessage），忽略 AI 的总结消息
-                    if hasattr(msg, 'name') and hasattr(msg, 'content') and msg.name:
-                        tool_name = msg.name
-                        logger.info(f"✓ 工具调用: {tool_name}")
-                        logger.debug(f"消息类型: {type(msg)}, content类型: {type(msg.content)}")
+                    # 只处理工具消息（ToolMessage），忽略AI的总结消息
+                    if not (hasattr(msg, 'name') and hasattr(msg, 'content') and msg.name):
+                        continue
+                    
+                    tool_name = msg.name
+                    logger.info(f"✓ 工具调用: {tool_name}")
+                    logger.debug(f"消息类型: {type(msg)}, content类型: {type(msg.content)}")
+                    
+                    try:
+                        tool_content: Any = None
                         
-                        try:
-                            tool_content = None
+                        # 如果已经是字典，直接使用
+                        if isinstance(msg.content, dict):
+                            tool_content = msg.content
+                            logger.debug("内容已经是字典类型")
+                        # 如果是字符串，尝试解析
+                        elif isinstance(msg.content, str):
+                            try:
+                                tool_content = json.loads(msg.content)
+                                logger.debug("JSON 解析成功")
+                            except json.JSONDecodeError:
+                                logger.warning(f"工具 {tool_name} 返回的不是有效 JSON")
+                                logger.debug(f"原始内容前200字符: {msg.content[:200]}")
+                        
+                        # 只保存字典类型的结果
+                        if isinstance(tool_content, dict):
+                            tool_results[tool_name] = tool_content
                             
-                            # 如果已经是字典，直接使用
-                            if isinstance(msg.content, dict):
-                                tool_content = msg.content
-                                logger.debug("内容已经是字典类型")
-                            # 如果是字符串，尝试解析
-                            elif isinstance(msg.content, str):
-                                import json
-                                try:
-                                    tool_content = json.loads(msg.content)
-                                    logger.debug("JSON 解析成功")
-                                except json.JSONDecodeError:
-                                    logger.warning(f"工具 {tool_name} 返回的不是有效 JSON，尝试其他方式")
-                                    logger.debug(f"原始内容前200字符: {msg.content[:200]}")
+                            # 提取性能数据
+                            if "_perf" in tool_content:
+                                perf_data = tool_content.pop("_perf")
+                                state["performance_metrics"].update(perf_data)
+                                logger.debug(f"工具耗时: {perf_data}")
                             
-                            # 只保存字典类型的结果
-                            if isinstance(tool_content, dict):
-                                tool_results[tool_name] = tool_content
-                                
-                                # 提取性能数据
-                                if "_perf" in tool_content:
-                                    perf_data = tool_content.pop("_perf")
-                                    state["performance_metrics"].update(perf_data)
-                                    logger.debug(f"工具耗时: {perf_data}")
-                                
-                                logger.debug(f"✓ 工具结果已保存: success={tool_content.get('success')}, has_data={bool(tool_content.get('data'))}")
-                                
-                                # 检查工具调用是否失败
-                                if not tool_content.get("success", True):
-                                    has_error = True
-                                    error_msg = tool_content.get("error", "查询失败")
-                                    logger.warning(f"工具调用失败: {error_msg}")
-                            else:
-                                logger.warning(f"✗ 工具 {tool_name} 结果未保存: tool_content类型={type(tool_content)}")
-                        except Exception as e:
-                            logger.error(f"处理工具结果时出错:\n{traceback.format_exc()}")
+                            logger.debug(
+                                f"✓ 工具结果已保存: success={tool_content.get('success')}, "
+                                f"has_data={bool(tool_content.get('data'))}"
+                            )
+                            
+                            # 检查工具调用是否失败
+                            if not tool_content.get("success", True):
+                                has_error = True
+                                error_msg = tool_content.get("error", "查询失败")
+                                logger.warning(f"工具调用失败: {error_msg}")
+                        else:
+                            logger.warning(
+                                f"✗ 工具 {tool_name} 结果未保存: "
+                                f"tool_content类型={type(tool_content)}"
+                            )
+                    except Exception as e:
+                        logger.error(f"处理工具结果时出错:\n{traceback.format_exc()}")
             
             # 如果没有工具结果，说明查询失败
             if not tool_results:
@@ -192,11 +211,12 @@ def process_query(state: AgentState) -> AgentState:
                 state["next_step"] = "end"
                 return state
             
-            # 检查是否有工具调用失败（特别是 query_user_by_phone）
-            if has_error or (tool_results.get("query_user_by_phone") and 
-                            not tool_results["query_user_by_phone"].get("success", True)):
+            # 检查是否有工具调用失败（特别是query_user_by_phone）
+            user_query_result = tool_results.get("query_user_by_phone")
+            if has_error or (user_query_result and not user_query_result.get("success", True)):
                 logger.warning("用户信息查询失败")
-                state["error"] = f"抱歉，未找到手机号 {params.get('phone')} 对应的用户信息。请确认手机号码是否正确。"
+                phone = params.get('phone', '未知')
+                state["error"] = f"抱歉，未找到手机号 {phone} 对应的用户信息。请确认手机号码是否正确。"
                 state["next_step"] = "end"
                 return state
             

@@ -1,32 +1,58 @@
 """MCP 工具集 - 数据库查询和第三方接口调用"""
-import httpx
-from sqlalchemy import create_engine, text
-from config import settings
-from typing import Dict, Any, Annotated
-from langchain_core.tools import tool
 import time
 import traceback
+from datetime import date, datetime
 from decimal import Decimal
-from datetime import datetime, date
+from typing import Any, Annotated, Dict
+
+import httpx
+from langchain_core.tools import tool
+from sqlalchemy import create_engine, text
+
+from config import settings
 from utils.logger import logger
 
-# 数据库连接
+# 数据库连接 - 配置连接池
 DATABASE_URL = f"mysql+pymysql://{settings.DB_USER}:{settings.DB_PASSWORD}@{settings.DB_HOST}:{settings.DB_PORT}/{settings.DB_NAME}"
-engine = create_engine(DATABASE_URL)
+engine = create_engine(
+    DATABASE_URL,
+    pool_size=10,              # 连接池大小
+    max_overflow=20,           # 最大溢出连接数
+    pool_timeout=30,           # 获取连接超时(秒)
+    pool_recycle=3600,         # 连接回收时间(1小时)
+    pool_pre_ping=True,        # 连接前检查是否有效
+    echo=False                 # 生产环境关闭SQL日志
+)
 
-def serialize_value(value):
-    """将数据库值转换为 JSON 兼容的类型"""
+def serialize_value(value: Any) -> Any:
+    """
+    将数据库值转换为JSON兼容的类型
+    
+    Args:
+        value: 数据库返回的值
+        
+    Returns:
+        JSON兼容的值
+    """
     if isinstance(value, Decimal):
         return float(value)
-    elif isinstance(value, (datetime, date)):
+    if isinstance(value, (datetime, date)):
         return value.isoformat()
-    elif value is None:
+    if value is None:
         return None
-    else:
-        return value
+    return value
 
-def serialize_row(row_mapping: dict) -> dict:
-    """将数据库行转换为 JSON 兼容的字典"""
+
+def serialize_row(row_mapping: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    将数据库行转换为JSON兼容的字典
+    
+    Args:
+        row_mapping: 数据库行映射
+        
+    Returns:
+        JSON兼容的字典
+    """
     return {key: serialize_value(value) for key, value in row_mapping.items()}
 
 @tool

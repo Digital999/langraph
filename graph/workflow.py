@@ -1,11 +1,18 @@
 """LangGraph 工作流定义"""
-from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import END, StateGraph
+
+from agents import (
+    process_format_result,
+    process_intent,
+    process_query,
+    process_report,
+)
 from models.schemas import AgentState
-from agents import process_intent, process_query, process_report, process_format_result
+
 
 def create_workflow():
-    """创建 LangGraph 工作流"""
+    """创建LangGraph工作流"""
     
     # 创建状态图
     workflow = StateGraph[AgentState, None, AgentState, AgentState](AgentState)
@@ -23,12 +30,37 @@ def create_workflow():
         if state.get("waiting_for_report_confirmation"):
             user_input = state.get("user_input", "").lower()
             # 检查用户是否确认生成报告
-            if any(keyword in user_input for keyword in ["不", "取消", "拒绝", "no", "cancel", "不需要", "不用"]):
+            reject_keywords = ["不", "取消", "拒绝", "no", "cancel", "不需要", "不用", "不要"]
+            confirm_keywords = ["是", "需要", "生成", "报告", "yes", "ok", "好"]
+            
+            if any(keyword in user_input for keyword in reject_keywords):
+                # 清理状态
                 state["waiting_for_report_confirmation"] = False
+                state["next_step"] = "end"
+                # 推送拒绝消息
+                try:
+                    from langgraph.config import get_stream_writer
+                    writer = get_stream_writer()
+                    writer({"type": "message", "content": "好的，如果以后需要生成报告，请告诉我。"})
+                except Exception:
+                    pass
                 return "end"
-            if any(keyword in user_input for keyword in ["是", "需要", "生成", "报告", "yes", "ok"]):
+            elif any(keyword in user_input for keyword in confirm_keywords):
+                # 清理状态并生成报告
                 state["waiting_for_report_confirmation"] = False
+                state["next_step"] = "report"
                 return "report"
+            else:
+                # 用户回复不明确，但不清理状态，继续等待明确回复
+                try:
+                    from langgraph.config import get_stream_writer
+                    writer = get_stream_writer()
+                    writer({"type": "message", "content": '请明确回复"是"或"不需要"确认是否需要生成报告。'})
+                except Exception:
+                    pass
+                # 保持 waiting_for_report_confirmation 为 True
+                state["next_step"] = "end"
+                return "end"
         
         return state.get("next_step", "end")
     
@@ -84,11 +116,12 @@ def create_workflow():
         }
     )
     
-    # 创建内存 checkpointer
+    # 创建内存checkpointer
     memory = MemorySaver()
     
-    # 编译工作流，传入 checkpointer
+    # 编译工作流,传入checkpointer
     return workflow.compile(checkpointer=memory)
+
 
 # 创建全局工作流实例
 app = create_workflow()
