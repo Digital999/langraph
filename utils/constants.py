@@ -23,15 +23,7 @@ MEAL_STATUS_MAP = {
     6: "已退租"
 }
 
-# 流式输出配置
-STREAM_CHUNK_SIZE = 5  # 流式输出每次发送的字符数
-STREAM_DELAY = 0.02  # 流式输出延迟（秒）
-
-# 队列检查间隔
-QUEUE_CHECK_INTERVAL = 0.01  # 队列检查间隔（秒）
-
 # LLM 配置
-LLM_MAX_TOKENS = 2000  # LLM 最大 token 数
 LLM_TEMPERATURE = 0  # LLM 温度
 LLM_MAX_RETRIES = 3  # LLM 最大重试次数
 LLM_TIMEOUT = 60  # LLM 超时时间（秒）

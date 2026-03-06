@@ -1,7 +1,9 @@
 """FastAPI 主应用入口"""
 import asyncio
+import json
 import os
 import traceback
+from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
 from fastapi import FastAPI, HTTPException
@@ -9,16 +11,34 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from graph import app as workflow_app
+from graph.workflow import init_checkpointer, cleanup_checkpointer, get_app
 from models.schemas import AgentResponse, AgentState, UserRequest
 from utils.constants import QUICK_RESPONSES
 from utils.logger import logger
 from utils.validators import sanitize_input
 
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """应用生命周期管理"""
+    # 启动时初始化 checkpointer
+    logger.info("应用启动中...")
+    await init_checkpointer()
+    logger.info("PostgreSQL Checkpointer 初始化完成")
+    
+    yield
+    
+    # 关闭时清理资源
+    logger.info("应用关闭中...")
+    await cleanup_checkpointer()
+    logger.info("资源清理完成")
+
+
 app = FastAPI(
     title="AI 报告生成系统",
     description="基于 FastAPI + LangGraph 的多 Agent 协同报告生成系统",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan
 )
 
 # 配置 CORS
@@ -68,21 +88,15 @@ async def generate_report(request: UserRequest):
     logger.info(f"收到报告生成请求: {request.user_input}")
     
     try:
-        # 创建初始状态
+        # 创建初始状态（只传入必要字段）
         initial_state: AgentState = {
             "user_input": request.user_input,
-            "is_complete": False,
-            "user_info": None,
-            "query_results": None,
-            "report_path": None,
-            "error": None,
-            "conversation_history": [],
-            "next_step": "intent"
+            "is_complete": False
         }
         
         # 执行工作流
         try:
-            result = workflow_app.invoke(initial_state)
+            result = get_app().invoke(initial_state)
         except Exception as workflow_error:
             logger.error(f"工作流执行错误:\n{traceback.format_exc()}")
             error_msg = str(workflow_error)
@@ -215,23 +229,23 @@ async def chat_stream(request: UserRequest):
                     await asyncio.sleep(0.01)
                 
                 elapsed = (asyncio.get_event_loop().time() - start_time) * 1000
-                yield f"data: {json.dumps({'type': 'end', 'status': 'complete', 'performance': {'total_ms': elapsed}}, ensure_ascii=False)}\n\n"
+                yield f"data: {json.dumps({'type': 'end', 'status': 'complete', 'performance': {'total_ms': round(elapsed, 2)}}, ensure_ascii=False)}\n\n"
                 logger.info(f"✓ 缓存响应完成,耗时: {elapsed:.0f}ms")
                 return
             
-            # 配置workflow
+            # 配置 workflow
             config = {"configurable": {"thread_id": thread_id}}
-            initial_input = {"user_input": user_input}
-            
-            # 配置workflow
-            config = {"configurable": {"thread_id": thread_id}}
-            initial_input = {"user_input": user_input}
+            # 不传入 conversation_history，让 checkpointer 自动加载历史记录
+            initial_input: AgentState = {
+                "user_input": user_input,
+                "is_complete": False
+            }
             
             # 使用LangGraph的astream方法，只监听custom事件
             # custom: 接收来自get_stream_writer()的自定义事件（格式化后的消息）
-            async for event in workflow_app.astream(
+            async for event in get_app().astream(
                 initial_input,
-                config=config,
+                config=config,  # type: ignore
                 stream_mode="custom"  # 只监听自定义事件
             ):
                 # 单一stream_mode时，event直接是数据字典
@@ -268,11 +282,11 @@ async def chat_stream(request: UserRequest):
             
             # 流式完成
             elapsed = (asyncio.get_event_loop().time() - start_time) * 1000
-            yield f"data: {json.dumps({'type': 'end', 'status': 'complete', 'performance': {'total_ms': elapsed}}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'type': 'end', 'status': 'complete', 'performance': {'total_ms': round(elapsed, 2)}}, ensure_ascii=False)}\n\n"
             logger.info(f"✓ 对话完成,耗时: {elapsed:.0f}ms")
         
-        except Exception as e:
-            error_msg = f"抱歉,处理请求时出错: {str(e)}"
+        except Exception:
+            error_msg = "抱歉,处理请求时出错，请稍后重试。"
             logger.error(f"流式处理错误:\n{traceback.format_exc()}")
             yield f"data: {json.dumps({'type': 'error', 'content': error_msg}, ensure_ascii=False)}\n\n"
             yield f"data: {json.dumps({'type': 'end', 'status': 'error'}, ensure_ascii=False)}\n\n"
@@ -290,7 +304,13 @@ async def chat_stream(request: UserRequest):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8001)
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=8001,
+        reload=True
+    )
+
 
 
 

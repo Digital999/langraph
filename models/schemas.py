@@ -18,6 +18,9 @@ class AgentState(TypedDict, total=False):
     waiting_for_report_confirmation: bool
     # 性能统计
     performance_metrics: Dict[str, float]
+    # RAG 相关字段
+    rag_answer: Optional[str]
+    rag_sources: Optional[List[Dict[str, Any]]]
 
 
 class UserRequest(BaseModel):

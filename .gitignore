@@ -28,3 +28,7 @@ reports/
 
 # 日志
 *.log
+
+# 向量数据库
+chroma_db/
+*.chroma

@@ -111,7 +111,7 @@ def process_format_result(state: AgentState) -> AgentState:
         state["error"] = "缺少查询结果"
         state["next_step"] = "end"
         if writer:
-            writer({"type": "error", "content": "缺少查询结果"})
+            writer({"type": "content", "content": "\n\n缺少查询结果"})
         return state
     
     try:
@@ -128,18 +128,17 @@ def process_format_result(state: AgentState) -> AgentState:
             state["error"] = "查询结果格式错误"
             state["next_step"] = "end"
             if writer:
-                writer({"type": "error", "content": "查询结果格式错误"})
+                writer({"type": "content", "content": "\n\n查询结果格式错误"})
             return state
         
         # 使用性能计时器
-        with PerformanceTimer("format_result", state.get("performance_metrics", {})) as timer:
+        with PerformanceTimer("format_result", state.get("performance_metrics", {})):
             # 格式化结果
             formatted_result = format_query_results(query_results)
             logger.debug(f"格式化结果:\n{formatted_result}")
             
             # 推送格式化后的结果到前端（保留换行符）
             if writer:
-                # 方案1：直接发送完整结果，前端需要处理\n
                 writer({"type": "result", "content": formatted_result})
             
             # 添加询问是否生成报告
@@ -150,17 +149,17 @@ def process_format_result(state: AgentState) -> AgentState:
             if writer:
                 writer({"type": "message", "content": report_prompt})
             
-            state["error"] = formatted_result  # 使用 error 字段返回结果
+            state["error"] = formatted_result
             state["waiting_for_report_confirmation"] = True
             state["next_step"] = "end"
         
-        logger.info(f"✓ 结果格式化完成，耗时: {timer.elapsed_ms:.0f}ms")
+        logger.info("✓ 结果格式化完成")
         return state
     
-    except Exception as e:
+    except Exception:
         logger.error(f"格式化失败: {traceback.format_exc()}")
         state["error"] = "结果格式化失败"
         state["next_step"] = "end"
         if writer:
-            writer({"type": "error", "content": "结果格式化失败"})
+            writer({"type": "content", "content": "\n\n结果格式化失败"})
         return state

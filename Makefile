@@ -1,4 +1,4 @@
-.PHONY: install run init-db clean clean-reports clean-cache help dev
+.PHONY: install run init-db clean clean-reports clean-cache help dev test-milvus test-postgres
 
 # 安装依赖
 install:
@@ -15,6 +15,18 @@ dev:
 # 初始化数据库
 init-db:
 	uv run python init_db.py
+
+# 测试 Milvus 连接
+test-milvus:
+	uv run python test_milvus_connection.py
+
+# 测试 PostgreSQL 连接
+test-postgres:
+	uv run python test_postgres_connection.py
+
+# 初始化向量数据库
+init-vector:
+	uv run python scripts/init_vector_store.py
 
 # 添加新依赖
 add:
@@ -60,6 +72,9 @@ help:
 	@echo "  make run           - 运行应用"
 	@echo "  make dev           - 开发模式运行（自动重载）"
 	@echo "  make init-db       - 初始化数据库"
+	@echo "  make test-milvus   - 测试 Milvus 连接"
+	@echo "  make test-postgres - 测试 PostgreSQL 连接"
+	@echo "  make init-vector   - 初始化向量数据库"
 	@echo ""
 	@echo "依赖管理："
 	@echo "  make add pkg=<包名>      - 添加新依赖"

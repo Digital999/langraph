@@ -18,6 +18,25 @@ class Settings(BaseSettings):
     DB_PASSWORD: str = os.getenv("DB_PASSWORD", "")
     DB_NAME: str = os.getenv("DB_NAME", "user_db")
     
+    # Milvus 向量数据库配置
+    MILVUS_HOST: str = os.getenv("MILVUS_HOST", "localhost")
+    MILVUS_PORT: int = int(os.getenv("MILVUS_PORT", "19530"))
+    MILVUS_USER: str = os.getenv("MILVUS_USER", "")
+    MILVUS_PASSWORD: str = os.getenv("MILVUS_PASSWORD", "")
+    MILVUS_COLLECTION: str = os.getenv("MILVUS_COLLECTION", "knowledge_base")
+    
+    # PostgreSQL 配置（用于 LangGraph 长期记忆）
+    POSTGRES_HOST: str = os.getenv("POSTGRES_HOST", "localhost")
+    POSTGRES_PORT: int = int(os.getenv("POSTGRES_PORT", "5432"))
+    POSTGRES_USER: str = os.getenv("POSTGRES_USER", "postgres")
+    POSTGRES_PASSWORD: str = os.getenv("POSTGRES_PASSWORD", "")
+    POSTGRES_DB: str = os.getenv("POSTGRES_DB", "langgraph_memory")
+    
+    @property
+    def POSTGRES_URI(self) -> str:
+        """构建 PostgreSQL 连接 URI"""
+        return f"postgresql://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}@{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
+    
     # 第三方接口配置
     IDENTITY_API_URL: str = os.getenv("IDENTITY_API_URL", "")
     IDENTITY_API_KEY: str = os.getenv("IDENTITY_API_KEY", "")

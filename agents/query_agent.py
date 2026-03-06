@@ -5,7 +5,7 @@ from typing import Any, Dict
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
-from langchain.agents import create_agent
+from langgraph.prebuilt import create_react_agent
 from langgraph.config import get_stream_writer
 
 from config import settings
@@ -63,7 +63,7 @@ llm = ChatOpenAI(
 )
 
 # 创建 ReAct Agent
-query_agent = create_agent(llm, ALL_TOOLS)
+query_agent = create_react_agent(llm, ALL_TOOLS)
 
 def process_query(state: AgentState) -> AgentState:
     """执行数据库查询 - 通过大模型自主选择工具"""
@@ -135,7 +135,7 @@ def process_query(state: AgentState) -> AgentState:
         logger.debug("调用 ReAct Agent 执行工具调用...")
         
         # 使用性能计时器
-        with PerformanceTimer("query_total", state["performance_metrics"]) as query_timer:
+        with PerformanceTimer("query_total", state["performance_metrics"]):
             with PerformanceTimer("query_agent_total", state["performance_metrics"]):
                 # 调用 Agent 执行查询
                 messages = [
@@ -207,8 +207,17 @@ def process_query(state: AgentState) -> AgentState:
             # 如果没有工具结果，说明查询失败
             if not tool_results:
                 logger.error("未能执行查询工具")
-                state["error"] = "抱歉，未能查询到相关信息。请检查手机号码是否正确。"
+                error_msg = "抱歉，未能查询到相关信息。请检查手机号码是否正确。"
+                state["error"] = error_msg
                 state["next_step"] = "end"
+                
+                # 推送错误消息到前端（使用 content 类型）
+                try:
+                    writer = get_stream_writer()
+                    writer({"type": "content", "content": "\n\n" + error_msg})
+                except Exception:
+                    pass
+                
                 return state
             
             # 检查是否有工具调用失败（特别是query_user_by_phone）
@@ -216,8 +225,17 @@ def process_query(state: AgentState) -> AgentState:
             if has_error or (user_query_result and not user_query_result.get("success", True)):
                 logger.warning("用户信息查询失败")
                 phone = params.get('phone', '未知')
-                state["error"] = f"抱歉，未找到手机号 {phone} 对应的用户信息。请确认手机号码是否正确。"
+                error_msg = f"抱歉，未找到手机号 {phone} 对应的用户信息。请确认手机号码是否正确。"
+                state["error"] = error_msg
                 state["next_step"] = "end"
+                
+                # 推送错误消息到前端（使用 content 类型）
+                try:
+                    writer = get_stream_writer()
+                    writer({"type": "content", "content": "\n\n" + error_msg})
+                except Exception:
+                    pass
+                
                 return state
             
             # 保存查询结果
@@ -225,11 +243,20 @@ def process_query(state: AgentState) -> AgentState:
             # 不再自动生成报告，而是返回结果并询问
             state["next_step"] = "format_result"
             
-            logger.info(f"✓ 查询完成，共调用 {len(tool_results)} 个工具，总耗时: {query_timer.elapsed_ms:.0f}ms")
+            logger.info(f"✓ 查询完成，共调用 {len(tool_results)} 个工具")
             return state
     
-    except Exception as e:
+    except Exception:
         logger.error(f"查询失败:\n{traceback.format_exc()}")
-        state["error"] = "抱歉，查询服务暂时不可用，请稍后重试。"
+        error_msg = "抱歉，查询服务暂时不可用，请稍后重试。"
+        state["error"] = error_msg
         state["next_step"] = "end"
+        
+        # 推送错误消息到前端（使用 content 类型）
+        try:
+            writer = get_stream_writer()
+            writer({"type": "content", "content": "\n\n" + error_msg})
+        except Exception:
+            pass
+        
         return state

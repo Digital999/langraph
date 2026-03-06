@@ -2,7 +2,7 @@
 name = "ai-report-system"
 version = "1.0.0"
 description = "基于 FastAPI + LangGraph 的多 Agent 协同报告生成系统"
-requires-python = ">=3.14"
+requires-python = ">=3.11,<3.14"
 dependencies = [
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.32.0",
@@ -10,16 +10,22 @@ dependencies = [
     "langchain-core>=0.3.15",
     "langchain-openai>=0.2.9",
     "langgraph>=0.2.45",
+    "langgraph-checkpoint-postgres>=2.0.0",
     "python-docx>=1.1.2",
     "pydantic>=2.10.0",
     "pydantic-settings>=2.6.0",
     "sqlalchemy>=2.0.36",
     "pymysql>=1.1.1",
+    "psycopg>=3.1.0",
+    "psycopg-binary>=3.1.0",
     "httpx>=0.28.0",
     "python-multipart>=0.0.12",
     "openai>=2.23.0",
     "pandas>=3.0.1",
     "openpyxl>=3.1.5",
+    "langchain-milvus>=0.1.0",
+    "langchain-community>=0.3.0",
+    "pymilvus>=2.4.0",
 ]
 
 [build-system]

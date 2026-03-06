@@ -3,7 +3,7 @@ import json
 import os
 import traceback
 from datetime import datetime
-from typing import Any, Dict, Union
+from typing import Any, Dict
 
 from docx import Document
 from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
@@ -130,7 +130,7 @@ def process_report(state: AgentState) -> AgentState:
         state["error"] = "缺少查询结果"
         state["next_step"] = "end"
         if writer:
-            writer({"type": "error", "content": "缺少查询结果"})
+            writer({"type": "content", "content": "\n\n缺少查询结果"})
         return state
     
     logger.debug(f"查询结果: {state['query_results']}")
@@ -153,11 +153,11 @@ def process_report(state: AgentState) -> AgentState:
         logger.debug(f"LLM 响应耗时: {elapsed:.0f}ms")
         
         # 处理响应内容
-        content: Union[str, list, Dict[str, Any]] = response.content
-        if isinstance(content, list):
-            content = content[0] if content else "{}"
+        content: str = response.content if isinstance(response.content, str) else str(response.content)
+        if isinstance(response.content, list) and response.content:
+            content = str(response.content[0])
         
-        content_str = str(content).strip()
+        content_str = content.strip()
         logger.llm_output(content_str)
         
         # 清理 markdown 代码块标记
@@ -196,11 +196,11 @@ def process_report(state: AgentState) -> AgentState:
             report_url = f"/api/download/{filename}"
             writer({"type": "report", "filename": filename, "url": report_url})
     
-    except Exception as e:
+    except Exception:
         logger.error(f"报告生成失败:\n{traceback.format_exc()}")
-        state["error"] = f"报告生成失败: {str(e)}"
+        state["error"] = "报告生成失败，请稍后重试"
         state["next_step"] = "end"
         if writer:
-            writer({"type": "error", "content": state["error"]})
+            writer({"type": "content", "content": "\n\n" + state["error"]})
     
     return state
