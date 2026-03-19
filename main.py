@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 
 from graph.workflow import init_checkpointer, cleanup_checkpointer, get_app
 from models.schemas import AgentResponse, AgentState, UserRequest
+from rag import get_vector_store
 from utils.constants import QUICK_RESPONSES
 from utils.logger import logger
 from utils.validators import sanitize_input
@@ -21,10 +22,17 @@ from utils.validators import sanitize_input
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """应用生命周期管理"""
-    # 启动时初始化 checkpointer
     logger.info("应用启动中...")
     await init_checkpointer()
     logger.info("PostgreSQL Checkpointer 初始化完成")
+    
+    # 在 async 上下文中预初始化 Milvus，避免同步线程里缺少 event loop
+    try:
+        store = get_vector_store()
+        _ = store.vector_store
+        logger.info("Milvus 向量数据库连接初始化完成")
+    except Exception as e:
+        logger.warning(f"Milvus 预初始化失败（RAG 功能可能不可用）: {e}")
     
     yield
     

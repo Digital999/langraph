@@ -11,6 +11,19 @@ class Settings(BaseSettings):
     OPENAI_BASE_URL: str = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
     MODEL_NAME: str = os.getenv("MODEL_NAME", "gpt-4")
     
+    # Embedding 模型配置（留空则复用 OPENAI 配置）
+    EMBEDDING_API_KEY: str = os.getenv("EMBEDDING_API_KEY", "")
+    EMBEDDING_BASE_URL: str = os.getenv("EMBEDDING_BASE_URL", "")
+    EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
+    
+    @property
+    def effective_embedding_api_key(self) -> str:
+        return self.EMBEDDING_API_KEY or self.OPENAI_API_KEY
+    
+    @property
+    def effective_embedding_base_url(self) -> str:
+        return self.EMBEDDING_BASE_URL or self.OPENAI_BASE_URL
+    
     # 数据库配置
     DB_HOST: str = os.getenv("DB_HOST", "localhost")
     DB_PORT: int = int(os.getenv("DB_PORT", "3306"))

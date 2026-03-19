@@ -23,6 +23,12 @@ MEAL_STATUS_MAP = {
     6: "已退租"
 }
 
+# RAG 配置
+RAG_TOP_K = 3                       # 检索 Top-K 文档
+RAG_SCORE_THRESHOLD = 1.0           # L2 距离阈值（越小越相关，超过此值视为不相关）
+RAG_LLM_TEMPERATURE = 0.2          # RAG 回答生成温度
+RAG_MAX_RETRIEVAL_RETRIES = 3       # 检索失败后最大重试轮数
+
 # LLM 配置
 LLM_TEMPERATURE = 0  # LLM 温度
 LLM_MAX_RETRIES = 3  # LLM 最大重试次数
