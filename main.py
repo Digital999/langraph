@@ -269,8 +269,9 @@ async def chat_stream(request: UserRequest):
                         yield f"data: {json.dumps({'type': 'content', 'content': event.get('content', '')}, ensure_ascii=False)}\n\n"
                     
                     elif chunk_type == "intent_complete":
-                        # 意图理解完成，开始查询
-                        yield f"data: {json.dumps({'type': 'content', 'content': '正在查询数据...'}, ensure_ascii=False)}\n\n"
+                        # 意图理解完成，开始查询（\n 不能写在 f-string 的 {} 表达式里的字面量中）
+                        _thinking_msg = "正在思考，请稍后...\n"
+                        yield f"data: {json.dumps({'type': 'content', 'content': _thinking_msg}, ensure_ascii=False)}\n\n"
                     
                     elif chunk_type == "status":
                         # 状态消息

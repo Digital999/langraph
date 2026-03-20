@@ -2,6 +2,7 @@
 from typing import List, Optional
 from pathlib import Path
 
+import pandas as pd
 from langchain_milvus import Milvus
 from langchain_community.document_loaders import TextLoader, DirectoryLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -78,6 +79,68 @@ class MilvusVectorStoreManager:
         except Exception:
             return False
     
+    def load_excel_qa(self, excel_path: str) -> List[Document]:
+        """从 Excel 加载问答数据
+
+        Excel 格式：第1列=分组名，第2列=问题，第3列=相似问题，第4列=答案。
+        每行生成一个 Document，page_content 包含问题+相似问题+答案，
+        metadata 记录分组和原始问题，便于检索和溯源。
+        """
+        path = Path(excel_path)
+        if not path.exists():
+            raise FileNotFoundError(f"Excel 文件不存在: {excel_path}")
+
+        df = pd.read_excel(excel_path, header=0)
+        if len(df.columns) < 4:
+            raise ValueError(
+                f"Excel 至少需要4列（分组/问题/相似问题/答案），"
+                f"当前只有 {len(df.columns)} 列: {list(df.columns)}"
+            )
+
+        col_category, col_question, col_similar, col_answer = (
+            df.columns[0], df.columns[1], df.columns[2], df.columns[3]
+        )
+        logger.info(
+            f"Excel 列映射: 分组={col_category}, 问题={col_question}, "
+            f"相似问题={col_similar}, 答案={col_answer}"
+        )
+
+        documents = []
+        skipped = 0
+        for idx, row in df.iterrows():
+            question = str(row[col_question]).strip()
+            answer = str(row[col_answer]).strip()
+            if not question or not answer or question == "nan" or answer == "nan":
+                skipped += 1
+                continue
+
+            category = str(row[col_category]).strip() if pd.notna(row[col_category]) else "未分类"
+            similar = str(row[col_similar]).strip() if pd.notna(row[col_similar]) else ""
+
+            # 构建 page_content：问题+相似问题+答案
+            parts = [f"问题：{question}"]
+            if similar and similar != "nan":
+                parts.append(f"相似问题：{similar}")
+            parts.append(f"答案：{answer}")
+            content = "\n".join(parts)
+
+            doc = Document(
+                page_content=content,
+                metadata={
+                    "category": category,
+                    "question": question,
+                    "source": str(path.name),
+                    "row_index": int(idx),
+                },
+            )
+            documents.append(doc)
+
+        logger.info(
+            f"从 {path.name} 加载了 {len(documents)} 条问答"
+            + (f"（跳过 {skipped} 条空行）" if skipped else "")
+        )
+        return documents
+
     def load_documents(self, directory: str) -> List[Document]:
         """加载目录下的所有文档"""
         documents = []
@@ -245,3 +308,33 @@ def init_milvus_knowledge_base(knowledge_dir: str = "./knowledge_base") -> None:
     store.add_documents(chunks)
     
     logger.info(f"Milvus 知识库初始化完成！共处理 {len(chunks)} 个文档块")
+
+
+def init_milvus_from_excel(
+    excel_path: str,
+    clear_existing: bool = False,
+) -> None:
+    """从 Excel 文件初始化知识库
+
+    Args:
+        excel_path: Excel 文件路径
+        clear_existing: 是否清除已有集合后重建
+    """
+    logger.info(f"开始从 Excel 初始化知识库: {excel_path}")
+
+    store = get_milvus_store()
+
+    if clear_existing:
+        logger.warning("清除已有集合...")
+        store.delete_collection()
+
+    documents = store.load_excel_qa(excel_path)
+    if not documents:
+        logger.warning("Excel 中没有有效的问答数据")
+        return
+
+    # FAQ 问答对通常较短，仍做切分以防单条答案过长
+    chunks = store.split_documents(documents, chunk_size=500, chunk_overlap=50)
+    store.add_documents(chunks)
+
+    logger.info(f"Excel 知识库初始化完成！{len(documents)} 条问答 → {len(chunks)} 个文档块")

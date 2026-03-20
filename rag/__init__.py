@@ -4,6 +4,7 @@ from rag.vector_store_milvus import (
     MilvusVectorStoreManager,
     get_milvus_store,
     init_milvus_knowledge_base,
+    init_milvus_from_excel,
 )
 
 VectorStoreManager = MilvusVectorStoreManager
@@ -15,6 +16,7 @@ __all__ = [
     "VectorStoreManager",
     "get_vector_store",
     "init_knowledge_base",
+    "init_milvus_from_excel",
     "MilvusVectorStoreManager",
     "get_milvus_store",
     "init_milvus_knowledge_base",

@@ -23,16 +23,18 @@ from utils.logger import logger
 
 
 RAG_SYSTEM_PROMPT = """\
-你是一个专业的客服助手，负责根据提供的知识库内容回答用户问题。
+你是专业客服助手，用自然、口语化的方式解答用户问题。
 
 回答要求：
-1. 基于检索到的知识库内容回答，不要编造信息
-2. 如果知识库中没有相关信息，诚实告知用户
-3. 回答要简洁、准确、友好
-4. 使用清晰的格式（适当分段、列表等）提升可读性
-5. 如果用户问题涉及多个知识点，请分条说明
+1. 严格依据下方业务片段中的信息作答，不要编造；片段里没有的就说目前无法确认或建议用户联系人工客服。
+2. 直接回答问题，像真人客服一样说话，不要用书面套话。
+3. 简洁、准确、友好；需要时分段或列表说明。
 
-以下是从知识库检索到的相关内容：
+【严禁在回复中出现以下说法】（用户不需要知道后台机制）：
+- 知识库、资料库、文档、检索、向量、RAG、根据上述内容、结合提供的信息、据资料显示 等措辞
+- 不要以「根据……」「结合……」开头；直接说结论或步骤即可。
+
+以下业务片段（内部使用，勿在回复中复述【】标签或提及来源）：
 {context}"""
 
 llm = ChatOpenAI(
@@ -123,7 +125,7 @@ def process_rag(state: AgentState) -> AgentState:
             return state
 
         if writer:
-            writer({"type": "status", "message": "正在检索知识库..."})
+            writer({"type": "status", "message": "正在为您查找相关信息..."})
 
         # 自适应检索（最多重试 RAG_MAX_RETRIEVAL_RETRIES 轮）
         history = state.get("conversation_history", [])
@@ -135,7 +137,7 @@ def process_rag(state: AgentState) -> AgentState:
             )
         except Exception as e:
             logger.error(f"向量检索失败: {e}")
-            error_msg = "抱歉，知识库服务暂时不可用，请稍后重试。"
+            error_msg = "抱歉，查询服务暂时不可用，请稍后重试。"
             state["error"] = error_msg
             state["next_step"] = "end"
             if writer:
@@ -145,8 +147,8 @@ def process_rag(state: AgentState) -> AgentState:
         if not relevant_docs:
             logger.warning(f"经过 {RAG_MAX_RETRIEVAL_RETRIES} 轮检索仍无结果")
             fallback_msg = (
-                "抱歉，经过多轮检索仍未在知识库中找到与您问题相关的信息。\n"
-                "您可以尝试换个方式提问，或者咨询以下类型的问题：\n"
+                "抱歉，暂时没有找到与您问题直接相关的说明。\n"
+                "您可以换个方式描述，或咨询以下类型的问题：\n"
                 "• 产品介绍与套餐信息\n"
                 "• 常见问题解答\n"
                 "• 业务办理流程\n"
@@ -162,7 +164,7 @@ def process_rag(state: AgentState) -> AgentState:
         context_parts = []
         for i, (doc, score) in enumerate(relevant_docs, 1):
             category = doc.metadata.get("category", "未分类")
-            context_parts.append(f"[文档{i} - {category}]\n{doc.page_content}\n")
+            context_parts.append(f"【{category}】\n{doc.page_content}\n")
         context = "\n".join(context_parts)
 
         if writer:
