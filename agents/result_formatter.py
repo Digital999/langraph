@@ -3,6 +3,8 @@ import traceback
 from typing import Any, Dict, List
 
 from langgraph.config import get_stream_writer
+from langgraph.types import interrupt
+
 from models.schemas import AgentState
 from utils.constants import MEAL_STATUS_MAP
 from utils.decorators import PerformanceTimer
@@ -117,12 +119,10 @@ def process_format_result(state: AgentState) -> AgentState:
     try:
         query_results = state["query_results"]
         
-        # 调试：打印查询结果的键
         logger.debug(f"查询结果包含的工具: {list(query_results.keys())}")
         for tool_name in query_results.keys():
             logger.debug(f"  - {tool_name}: {type(query_results[tool_name])}")
         
-        # 检查 query_results 是否是字典
         if not isinstance(query_results, dict):
             logger.error(f"查询结果类型错误: {type(query_results)}")
             state["error"] = "查询结果格式错误"
@@ -131,27 +131,16 @@ def process_format_result(state: AgentState) -> AgentState:
                 writer({"type": "content", "content": "\n\n查询结果格式错误"})
             return state
         
-        # 使用性能计时器
         with PerformanceTimer("format_result", state.get("performance_metrics", {})):
-            # 格式化结果
             formatted_result = format_query_results(query_results)
             logger.debug(f"格式化结果:\n{formatted_result}")
             
-            # 推送格式化后的结果到前端（保留换行符）
             if writer:
                 writer({"type": "result", "content": formatted_result})
-            
-            # 添加询问是否生成报告
-            report_prompt = "\n" + "="*50 + "\n" + '是否需要生成详细报告？（回复"是"、"需要"、"生成报告"等即可生成Word报告）'
-            formatted_result += report_prompt
-            
-            # 推送报告询问
-            if writer:
-                writer({"type": "message", "content": report_prompt})
+                writer({"type": "message", "content": '是否需要生成详细报告？（回复"是"或"不需要"）'})
             
             state["error"] = formatted_result
-            state["waiting_for_report_confirmation"] = True
-            state["next_step"] = "end"
+            state["next_step"] = "confirm_report"
         
         logger.info("✓ 结果格式化完成")
         return state
@@ -163,3 +152,38 @@ def process_format_result(state: AgentState) -> AgentState:
         if writer:
             writer({"type": "content", "content": "\n\n结果格式化失败"})
         return state
+
+
+def process_confirm_report(state: AgentState) -> AgentState:
+    """通过 interrupt 等待用户确认是否生成报告（human-in-the-loop）
+
+    注意：interrupt() 恢复时节点会从头重新执行，
+    因此提问推送放在 format_result 中（只执行一次），此处不做 writer push。
+    """
+    answer = interrupt("等待用户确认是否生成报告")
+
+    try:
+        writer = get_stream_writer()
+    except Exception:
+        writer = None
+
+    user_answer = str(answer).strip().lower()
+    reject_keywords = ["不", "否", "算了", "取消", "no", "cancel"]
+    confirm_keywords = ["是", "需要", "生成", "报告", "yes", "ok", "好"]
+
+    # 拒绝关键词优先，避免 "不需要" 被 "需要" 误匹配
+    if any(kw in user_answer for kw in reject_keywords):
+        logger.info("用户拒绝生成报告")
+        state["next_step"] = "end"
+        if writer:
+            writer({"type": "message", "content": "好的，如果以后需要生成报告，请告诉我。"})
+    elif any(kw in user_answer for kw in confirm_keywords):
+        logger.info("用户确认生成报告")
+        state["next_step"] = "report"
+    else:
+        logger.info("用户回复不明确，默认不生成报告")
+        state["next_step"] = "end"
+        if writer:
+            writer({"type": "message", "content": "好的，如果以后需要生成报告，请告诉我。"})
+
+    return state

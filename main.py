@@ -11,6 +11,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
+from langgraph.types import Command
+
 from graph.workflow import init_checkpointer, cleanup_checkpointer, get_app
 from models.schemas import AgentResponse, AgentState, UserRequest
 from rag import get_vector_store
@@ -241,20 +243,24 @@ async def chat_stream(request: UserRequest):
                 logger.info(f"✓ 缓存响应完成,耗时: {elapsed:.0f}ms")
                 return
             
-            # 配置 workflow
             config = {"configurable": {"thread_id": thread_id}}
-            # 不传入 conversation_history，让 checkpointer 自动加载历史记录
-            initial_input: AgentState = {
-                "user_input": user_input,
-                "is_complete": False
-            }
-            
-            # 使用LangGraph的astream方法，只监听custom事件
-            # custom: 接收来自get_stream_writer()的自定义事件（格式化后的消息）
-            async for event in get_app().astream(
-                initial_input,
+            graph_app = get_app()
+
+            # 检测图是否处于 interrupt 中断状态（如等待报告确认）
+            graph_state = await graph_app.aget_state(config)
+            if graph_state.next:
+                logger.info(f"检测到中断状态，恢复执行: pending={graph_state.next}")
+                stream_input: AgentState | Command = Command(resume=user_input)
+            else:
+                stream_input = {
+                    "user_input": user_input,
+                    "is_complete": False,
+                }
+
+            async for event in graph_app.astream(
+                stream_input,
                 config=config,  # type: ignore
-                stream_mode="custom"  # 只监听自定义事件
+                stream_mode="custom",
             ):
                 # 单一stream_mode时，event直接是数据字典
                 if isinstance(event, dict):

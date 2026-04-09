@@ -97,6 +97,28 @@ prompt = ChatPromptTemplate.from_messages([
 
 chain_stream = prompt | llm_stream
 
+
+def _build_missing_params_hint(result: dict) -> str:
+    """LLM 返回 complete=false 的 JSON 但没附带自然语言提示时，根据 query_type 生成友好文案"""
+    query_type = result.get("query_type", "")
+    params = result.get("params", {})
+
+    if query_type in ("package", "realname"):
+        if not params.get("phone"):
+            return "好的，请提供您的11位手机号码。"
+    elif query_type == "identity":
+        missing = []
+        if not params.get("phone"):
+            missing.append("手机号（11位）")
+        if not params.get("name"):
+            missing.append("姓名")
+        if not params.get("id_card"):
+            missing.append("身份证号（18位）")
+        if missing:
+            return f"好的，还需要以下信息：{'、'.join(missing)}。"
+    return "请告诉我您想查询什么信息？"
+
+
 def process_intent(state: AgentState) -> AgentState:
     """
     处理用户意图 - 统一入口（支持LangGraph流式输出）
@@ -104,32 +126,17 @@ def process_intent(state: AgentState) -> AgentState:
     使用 get_stream_writer() 自动推送流式消息到前端
     """
     try:
-        # 检查是否在等待报告确认
-        if state.get("waiting_for_report_confirmation"):
-            user_input = state.get("user_input", "").lower()
-            # 检查用户输入是否是报告确认相关的回复
-            report_related_keywords = ["是", "需要", "生成", "报告", "不", "取消", "拒绝", "不需要", "不用", "不要", "yes", "no", "ok", "好", "cancel"]
-            
-            # 如果用户输入包含报告相关关键词，说明是在回答报告确认问题
-            if any(keyword in user_input for keyword in report_related_keywords):
-                logger.info("检测到报告确认等待状态，跳过意图理解")
-                # 直接返回，让workflow的路由逻辑处理
-                state["is_complete"] = False
-                state["next_step"] = "end"
-                return state
-            else:
-                # 用户输入不是报告确认相关，说明是新的查询，清理报告确认状态
-                logger.info("用户开始新的查询，清理报告确认状态")
-                state["waiting_for_report_confirmation"] = False
-                # 继续正常的意图理解流程
-        
+        # 清理上一轮残留的 per-turn 状态，防止跨轮泄漏
+        state["error"] = None
+        state["next_step"] = "end"
+        state["is_complete"] = False
+
         full_content = ""
         
-        # 获取流式写入器（如果在流式上下文中）
         try:
             writer = get_stream_writer()
         except Exception:
-            writer = None  # 非流式上下文
+            writer = None
         
         # 构建对话历史字符串
         history = build_history_string(
@@ -188,16 +195,17 @@ def process_intent(state: AgentState) -> AgentState:
                     writer({"type": "intent_complete", "query_type": result.get("query_type")})
             else:
                 state["is_complete"] = False
-                state["error"] = result.get("response") or result.get("suggestion") or content_to_parse
+                hint = result.get("response") or result.get("suggestion") or ""
+                if not hint or hint.startswith("{"):
+                    hint = _build_missing_params_hint(result)
+                state["error"] = hint
                 state["next_step"] = "end"
-                # 非完整请求，推送提示信息
-                if writer and state["error"]:
-                    writer({"type": "message", "content": state["error"]})
-                # 更新对话历史
+                if writer and hint:
+                    writer({"type": "message", "content": hint})
                 if "conversation_history" not in state:
                     state["conversation_history"] = []
                 state["conversation_history"].append(f"用户: {state['user_input']}")
-                state["conversation_history"].append(f"助手: {state['error']}")
+                state["conversation_history"].append(f"助手: {hint}")
         
         except json.JSONDecodeError:
             # 不是 JSON，说明是自然语言回复，输出到前端

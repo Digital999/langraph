@@ -14,8 +14,6 @@ class AgentState(TypedDict, total=False):
     error: Optional[str]
     conversation_history: List[str]
     next_step: str
-    # 用于询问是否生成报告
-    waiting_for_report_confirmation: bool
     # 性能统计
     performance_metrics: Dict[str, float]
     # RAG 相关字段

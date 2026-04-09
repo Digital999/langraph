@@ -7,6 +7,7 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
 from agents import (
+    process_confirm_report,
     process_format_result,
     process_intent,
     process_query,
@@ -36,114 +37,61 @@ def create_workflow():
     workflow.add_node("intent", process_intent)
     workflow.add_node("query", process_query)
     workflow.add_node("format_result", process_format_result)
+    workflow.add_node("confirm_report", process_confirm_report)
     workflow.add_node("report", process_report)
     workflow.add_node("rag_retrieve", process_rag_retrieve)
     workflow.add_node("rag_rewrite", process_rag_rewrite)
     workflow.add_node("rag_generate", process_rag_generate)
     
-    # 定义路由逻辑
+    # ── 路由函数 ──
+
     def route_after_intent(state: AgentState) -> str:
-        """意图理解后的路由"""
-        # 检查是否在等待报告确认
-        if state.get("waiting_for_report_confirmation"):
-            user_input = state.get("user_input", "").lower()
-            # 检查用户是否确认生成报告
-            reject_keywords = ["不", "取消", "拒绝", "no", "cancel", "不需要", "不用", "不要"]
-            confirm_keywords = ["是", "需要", "生成", "报告", "yes", "ok", "好"]
-            
-            if any(keyword in user_input for keyword in reject_keywords):
-                # 清理状态
-                state["waiting_for_report_confirmation"] = False
-                state["next_step"] = "end"
-                # 推送拒绝消息
-                try:
-                    from langgraph.config import get_stream_writer
-                    writer = get_stream_writer()
-                    writer({"type": "message", "content": "好的，如果以后需要生成报告，请告诉我。"})
-                except Exception:
-                    pass
-                return "end"
-            elif any(keyword in user_input for keyword in confirm_keywords):
-                # 清理状态并生成报告
-                state["waiting_for_report_confirmation"] = False
-                state["next_step"] = "report"
-                return "report"
-            else:
-                # 用户回复不明确，但不清理状态，继续等待明确回复
-                try:
-                    from langgraph.config import get_stream_writer
-                    writer = get_stream_writer()
-                    writer({"type": "message", "content": '请明确回复"是"或"不需要"确认是否需要生成报告。'})
-                except Exception:
-                    pass
-                # 保持 waiting_for_report_confirmation 为 True
-                state["next_step"] = "end"
-                return "end"
-        
-        # 根据查询类型路由
         next_step = state.get("next_step", "end")
-        
-        # 如果是知识问答，路由到 RAG
         user_info = state.get("user_info")
         if state.get("is_complete") and user_info and user_info.get("query_type") == "knowledge_qa":
             return "rag"
-        
         return next_step
-    
+
     def route_after_query(state: AgentState) -> str:
-        """查询后的路由"""
         return state.get("next_step", "end")
-    
+
     def route_after_format(state: AgentState) -> str:
-        """格式化后的路由"""
         return state.get("next_step", "end")
-    
-    def route_after_report(state: AgentState) -> str:
-        """报告生成后的路由"""
+
+    def route_after_confirm(state: AgentState) -> str:
         return state.get("next_step", "end")
-    
-    # 设置入口点
+
+    # ── 入口 ──
     workflow.set_entry_point("intent")
     
-    # 添加条件边
+    # ── 边 ──
     workflow.add_conditional_edges(
         "intent",
         route_after_intent,
-        {
-            "query": "query",
-            "report": "report",
-            "rag": "rag_retrieve",
-            "end": END
-        }
+        {"query": "query", "report": "report", "rag": "rag_retrieve", "end": END},
     )
     
     workflow.add_conditional_edges(
         "query",
         route_after_query,
-        {
-            "format_result": "format_result",
-            "report": "report",
-            "end": END
-        }
+        {"format_result": "format_result", "report": "report", "end": END},
     )
     
     workflow.add_conditional_edges(
         "format_result",
         route_after_format,
-        {
-            "end": END
-        }
+        {"confirm_report": "confirm_report", "end": END},
     )
-    
+
     workflow.add_conditional_edges(
-        "report",
-        route_after_report,
-        {
-            "end": END
-        }
+        "confirm_report",
+        route_after_confirm,
+        {"report": "report", "end": END},
     )
+
+    workflow.add_edge("report", END)
     
-    # RAG 检索后：有结果 → 生成；无结果且未超限 → 改写；否则 → 结束
+    # RAG 子流程
     def route_after_rag_retrieve(state: AgentState) -> str:
         if state.get("error"):
             return "end"
@@ -157,11 +105,7 @@ def create_workflow():
     workflow.add_conditional_edges(
         "rag_retrieve",
         route_after_rag_retrieve,
-        {
-            "rag_generate": "rag_generate",
-            "rag_rewrite": "rag_rewrite",
-            "end": END,
-        }
+        {"rag_generate": "rag_generate", "rag_rewrite": "rag_rewrite", "end": END},
     )
     workflow.add_edge("rag_rewrite", "rag_retrieve")
     workflow.add_edge("rag_generate", END)
