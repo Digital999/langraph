@@ -21,6 +21,12 @@ class AgentState(TypedDict, total=False):
     # RAG 相关字段
     rag_answer: Optional[str]
     rag_sources: Optional[List[Dict[str, Any]]]
+    # RAG 检索重试状态（图结构循环用）
+    rag_retrieval_attempt: int
+    rag_search_query: Optional[str]
+    rag_attempted_queries: List[str]
+    rag_retrieved_docs: Optional[List[Dict[str, Any]]]
+    rag_retry_pending: bool
 
 
 class UserRequest(BaseModel):

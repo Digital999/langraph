@@ -1,11 +1,18 @@
-"""RAG Agent - 基于知识库的问答（自适应检索 + 流式输出）"""
+"""RAG Agent - 基于知识库的问答（图结构检索重试 + 流式输出）
+
+检索流程通过 LangGraph 图结构实现循环重试：
+    rag_retrieve → (有结果?) → rag_generate → END
+         ↑              ↓ (无结果 & 未超限)
+         └── rag_rewrite ←
+                   ↓ (超限)
+                  END (fallback)
+"""
 import traceback
-from typing import List, Tuple
+from typing import Any, Dict, List
 
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
-from langchain_core.documents import Document
 from langgraph.config import get_stream_writer
 
 from config import settings
@@ -52,31 +59,65 @@ answer_prompt = ChatPromptTemplate.from_messages([
 
 answer_chain = answer_prompt | llm | StrOutputParser()
 
+FALLBACK_MESSAGE = (
+    "抱歉，暂时没有找到与您问题直接相关的说明。\n"
+    "您可以换个方式描述，或咨询以下类型的问题：\n"
+    "• 产品介绍与套餐信息\n"
+    "• 常见问题解答\n"
+    "• 业务办理流程\n"
+    "• 资费规则说明"
+)
 
-def _retrieve_with_retry(
-    user_input: str,
-    history: List[str],
-    writer,
-) -> Tuple[List[Tuple[Document, float]], str]:
-    """自适应检索：失败后由 LLM 改写查询重试，最多 RAG_MAX_RETRIEVAL_RETRIES 轮。
 
-    Returns:
-        (检索结果列表, 最终命中的查询语句)
+def _get_writer():
+    try:
+        return get_stream_writer()
+    except Exception:
+        return None
+
+
+def process_rag_retrieve(state: AgentState) -> AgentState:
+    """RAG 检索节点：执行向量检索，首次调用时自动改写查询
+
+    通过 rag_retry_pending 区分「新一轮对话进入」和「rag_rewrite 循环回来」：
+    - False / 不存在 → 新进入，重置所有 RAG 重试状态
+    - True → 来自 rag_rewrite，沿用已改写的 search_query
     """
-    vector_store = get_vector_store()
-    attempted_queries: List[str] = []
+    try:
+        writer = _get_writer()
+        user_input = state.get("user_input", "")
+        if not user_input:
+            state["error"] = "缺少用户输入"
+            state["next_step"] = "end"
+            return state
 
-    # 第 1 轮：结合历史改写
-    search_query = rewrite_query_with_history(
-        query=user_input,
-        history=history,
-        max_turns=MAX_HISTORY_DISPLAY_TURNS,
-    )
+        from_rewrite = state.get("rag_retry_pending", False)
+        state["rag_retry_pending"] = False
 
-    for attempt in range(1, RAG_MAX_RETRIEVAL_RETRIES + 1):
-        attempted_queries.append(search_query)
+        if not from_rewrite:
+            history = state.get("conversation_history", [])
+            search_query = rewrite_query_with_history(
+                query=user_input,
+                history=history,
+                max_turns=MAX_HISTORY_DISPLAY_TURNS,
+            )
+            state["rag_search_query"] = search_query
+            state["rag_attempted_queries"] = []
+            state["rag_retrieval_attempt"] = 1
+            state["rag_retrieved_docs"] = []
+            if writer:
+                writer({"type": "status", "message": "正在为您查找相关信息..."})
+
+        attempt = state["rag_retrieval_attempt"]
+        search_query = state["rag_search_query"]
+
+        attempted = list(state.get("rag_attempted_queries", []))
+        attempted.append(search_query)
+        state["rag_attempted_queries"] = attempted
+
         logger.info(f"检索第{attempt}轮, query='{search_query}'")
 
+        vector_store = get_vector_store()
         results = vector_store.similarity_search_with_score(
             query=search_query,
             k=RAG_TOP_K,
@@ -88,89 +129,82 @@ def _retrieve_with_retry(
                 f"第{attempt}轮检索命中 {len(results)} 条, "
                 f"L2 距离: [{', '.join(f'{s:.3f}' for _, s in results)}]"
             )
-            return results, search_query
+            state["rag_retrieved_docs"] = [
+                {
+                    "content": doc.page_content,
+                    "metadata": dict(doc.metadata),
+                    "score": float(score),
+                }
+                for doc, score in results
+            ]
+        else:
+            logger.warning(f"第{attempt}轮检索无结果")
+            state["rag_retrieved_docs"] = []
 
-        logger.warning(f"第{attempt}轮检索无结果")
+            if attempt >= RAG_MAX_RETRIEVAL_RETRIES:
+                logger.warning(f"经过 {RAG_MAX_RETRIEVAL_RETRIES} 轮检索仍无结果")
+                state["rag_answer"] = FALLBACK_MESSAGE
+                state["next_step"] = "end"
+                if writer:
+                    writer({"type": "message", "content": FALLBACK_MESSAGE})
 
-        if attempt < RAG_MAX_RETRIEVAL_RETRIES:
-            if writer:
-                writer({
-                    "type": "status",
-                    "message": f"未找到相关内容，正在换一种方式检索（第{attempt+1}轮）...",
-                })
-            search_query = reformulate_failed_query(
-                original_question=user_input,
-                history=history,
-                attempted_queries=attempted_queries,
-                max_turns=MAX_HISTORY_DISPLAY_TURNS,
-            )
+        return state
 
-    return [], search_query
-
-
-def process_rag(state: AgentState) -> AgentState:
-    """处理知识库问答（自适应检索 + 流式输出）"""
-    try:
-        logger.info("开始 RAG 问答")
-
-        try:
-            writer = get_stream_writer()
-        except Exception:
-            writer = None
-
-        user_input = state.get("user_input", "")
-        if not user_input:
-            state["error"] = "缺少用户输入"
-            state["next_step"] = "end"
-            return state
-
+    except Exception:
+        logger.error(f"RAG 检索失败:\n{traceback.format_exc()}")
+        error_msg = "抱歉，查询服务暂时不可用，请稍后重试。"
+        state["error"] = error_msg
+        state["next_step"] = "end"
+        writer = _get_writer()
         if writer:
-            writer({"type": "status", "message": "正在为您查找相关信息..."})
+            writer({"type": "message", "content": error_msg})
+        return state
 
-        # 自适应检索（最多重试 RAG_MAX_RETRIEVAL_RETRIES 轮）
-        history = state.get("conversation_history", [])
-        try:
-            relevant_docs, final_query = _retrieve_with_retry(
-                user_input=user_input,
-                history=history,
-                writer=writer,
-            )
-        except Exception as e:
-            logger.error(f"向量检索失败: {e}")
-            error_msg = "抱歉，查询服务暂时不可用，请稍后重试。"
-            state["error"] = error_msg
-            state["next_step"] = "end"
-            if writer:
-                writer({"type": "message", "content": error_msg})
-            return state
 
-        if not relevant_docs:
-            logger.warning(f"经过 {RAG_MAX_RETRIEVAL_RETRIES} 轮检索仍无结果")
-            fallback_msg = (
-                "抱歉，暂时没有找到与您问题直接相关的说明。\n"
-                "您可以换个方式描述，或咨询以下类型的问题：\n"
-                "• 产品介绍与套餐信息\n"
-                "• 常见问题解答\n"
-                "• 业务办理流程\n"
-                "• 资费规则说明"
-            )
-            state["rag_answer"] = fallback_msg
-            state["next_step"] = "end"
-            if writer:
-                writer({"type": "message", "content": fallback_msg})
-            return state
+def process_rag_rewrite(state: AgentState) -> AgentState:
+    """RAG 查询改写节点：检索失败后用 LLM 从不同角度重新生成检索语句"""
+    writer = _get_writer()
+    attempt = state.get("rag_retrieval_attempt", 1)
+    user_input = state.get("user_input", "")
+    history = state.get("conversation_history", [])
+    attempted_queries = state.get("rag_attempted_queries", [])
 
-        # 构建上下文
+    if writer:
+        writer({
+            "type": "status",
+            "message": f"未找到相关内容，正在换一种方式检索（第{attempt + 1}轮）...",
+        })
+
+    new_query = reformulate_failed_query(
+        original_question=user_input,
+        history=history,
+        attempted_queries=attempted_queries,
+        max_turns=MAX_HISTORY_DISPLAY_TURNS,
+    )
+
+    state["rag_search_query"] = new_query
+    state["rag_retrieval_attempt"] = attempt + 1
+    state["rag_retry_pending"] = True
+
+    return state
+
+
+def process_rag_generate(state: AgentState) -> AgentState:
+    """RAG 回答生成节点：基于检索结果流式生成答案"""
+    try:
+        writer = _get_writer()
+        user_input = state.get("user_input", "")
+        retrieved_docs: List[Dict[str, Any]] = state.get("rag_retrieved_docs", [])
+
         context_parts = []
-        for i, (doc, score) in enumerate(relevant_docs, 1):
-            category = doc.metadata.get("category", "未分类")
-            context_parts.append(f"【{category}】\n{doc.page_content}\n")
+        for doc_info in retrieved_docs:
+            category = doc_info["metadata"].get("category", "未分类")
+            context_parts.append(f"【{category}】\n{doc_info['content']}\n")
         context = "\n".join(context_parts)
 
         if writer:
             writer({"type": "status", "message": "正在生成答案..."})
 
-        # 流式生成答案
         full_response = ""
         for chunk in answer_chain.stream({"context": context, "question": user_input}):
             full_response += chunk
@@ -183,15 +217,14 @@ def process_rag(state: AgentState) -> AgentState:
             if writer and full_response:
                 writer({"type": "message", "content": full_response})
 
-        # 保存到状态
         state["rag_answer"] = full_response
         state["rag_sources"] = [
             {
-                "category": doc.metadata.get("category", "未分类"),
-                "source": doc.metadata.get("source", "未知"),
-                "score": round(float(score), 4),
+                "category": doc_info["metadata"].get("category", "未分类"),
+                "source": doc_info["metadata"].get("source", "未知"),
+                "score": round(doc_info["score"], 4),
             }
-            for doc, score in relevant_docs
+            for doc_info in retrieved_docs
         ]
         state["next_step"] = "end"
 
@@ -204,15 +237,11 @@ def process_rag(state: AgentState) -> AgentState:
         return state
 
     except Exception:
-        logger.error(f"RAG 问答失败:\n{traceback.format_exc()}")
+        logger.error(f"RAG 回答生成失败:\n{traceback.format_exc()}")
         error_msg = "抱歉，处理您的问题时出现错误，请稍后重试。"
         state["error"] = error_msg
         state["next_step"] = "end"
-
-        try:
-            writer = get_stream_writer()
+        writer = _get_writer()
+        if writer:
             writer({"type": "message", "content": error_msg})
-        except Exception:
-            pass
-
         return state

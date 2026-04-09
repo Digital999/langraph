@@ -11,10 +11,13 @@ from agents import (
     process_intent,
     process_query,
     process_report,
-    process_rag,
+    process_rag_retrieve,
+    process_rag_rewrite,
+    process_rag_generate,
 )
 from models.schemas import AgentState
 from config import settings
+from utils.constants import RAG_MAX_RETRIEVAL_RETRIES
 from utils.logger import logger
 
 
@@ -34,7 +37,9 @@ def create_workflow():
     workflow.add_node("query", process_query)
     workflow.add_node("format_result", process_format_result)
     workflow.add_node("report", process_report)
-    workflow.add_node("rag", process_rag)
+    workflow.add_node("rag_retrieve", process_rag_retrieve)
+    workflow.add_node("rag_rewrite", process_rag_rewrite)
+    workflow.add_node("rag_generate", process_rag_generate)
     
     # 定义路由逻辑
     def route_after_intent(state: AgentState) -> str:
@@ -107,7 +112,7 @@ def create_workflow():
         {
             "query": "query",
             "report": "report",
-            "rag": "rag",
+            "rag": "rag_retrieve",
             "end": END
         }
     )
@@ -138,8 +143,28 @@ def create_workflow():
         }
     )
     
-    # RAG 节点后直接结束
-    workflow.add_edge("rag", END)
+    # RAG 检索后：有结果 → 生成；无结果且未超限 → 改写；否则 → 结束
+    def route_after_rag_retrieve(state: AgentState) -> str:
+        if state.get("error"):
+            return "end"
+        if state.get("rag_retrieved_docs"):
+            return "rag_generate"
+        attempt = state.get("rag_retrieval_attempt", 1)
+        if attempt >= RAG_MAX_RETRIEVAL_RETRIES:
+            return "end"
+        return "rag_rewrite"
+
+    workflow.add_conditional_edges(
+        "rag_retrieve",
+        route_after_rag_retrieve,
+        {
+            "rag_generate": "rag_generate",
+            "rag_rewrite": "rag_rewrite",
+            "end": END,
+        }
+    )
+    workflow.add_edge("rag_rewrite", "rag_retrieve")
+    workflow.add_edge("rag_generate", END)
     
     # 编译工作流（使用全局 checkpointer）
     if _checkpointer:
@@ -215,3 +240,21 @@ def get_app():
 
 # 全局应用实例（初始不带 checkpointer，需要在启动时调用 init_checkpointer）
 app = create_workflow()
+
+
+if __name__ == "__main__":
+    import sys
+    from pathlib import Path
+
+    output_dir = Path(__file__).resolve().parent.parent / "graph_images"
+    output_dir.mkdir(exist_ok=True)
+    output_path = output_dir / f"{Path(__file__).stem}.png"
+
+    compiled = create_workflow()
+    png_data = compiled.get_graph().draw_mermaid_png()
+    output_path.write_bytes(png_data)
+    print(f"Graph saved: {output_path}")
+
+    if "--open" in sys.argv:
+        import webbrowser
+        webbrowser.open(str(output_path))
